@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Datos locales del usuario: no subir nunca
+plantilla.json
+*.docx
+*.doc
+escudo.png

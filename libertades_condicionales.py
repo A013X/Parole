@@ -1,46 +1,44 @@
-import tkinter as tk
-from tkinter import messagebox, ttk, filedialog
-from datetime import datetime, timedelta
+"""Parole: calculadora de fechas de condena y generador de documentos Word.
+
+Interfaz gráfica (Tkinter). La lógica de cálculo está en calculos.py.
+"""
+
 import json
 import os
-from docx import Document
-from docx.shared import Inches, Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+import sys
+import tkinter as tk
+from datetime import datetime
+from tkinter import filedialog, messagebox, ttk
 
-meses_espanol = [
-    "enero", "febrero", "marzo", "abril", "mayo", "junio",
-    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
-]
+try:
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Inches, Pt
+except ImportError:
+    # Aviso claro en vez de un error técnico si falta la librería
+    _root = tk.Tk()
+    _root.withdraw()
+    messagebox.showerror(
+        "Falta una librería",
+        "Para generar documentos Word hace falta instalar python-docx.\n\n"
+        "Abre una terminal y escribe:\n\n"
+        "    py -m pip install -r requirements.txt\n\n"
+        "(o: py -m pip install python-docx)",
+    )
+    sys.exit(1)
 
-def fecha_larga(fecha_dt):
-    if not fecha_dt:
-        return ""
-    dia = fecha_dt.day
-    mes = meses_espanol[fecha_dt.month - 1]
-    año = fecha_dt.year
-    return f"{dia} de {mes} de {año}"
+from calculos import (calcular_condena, convertir_dias, edad_en, fecha_larga,
+                      nacimiento_desde_ci, parsear_fecha, rellenar_plantilla)
 
-def convertir_dias_mejorado(dias):
-    if dias == 0:
-        return "0 días"
-    signo = '-' if dias < 0 else ''
-    dias_abs = abs(dias)
-    años = dias_abs // 365
-    resto = dias_abs % 365
-    meses = resto // 30
-    dias_resto = resto % 30
-    if meses >= 12:
-        años += meses // 12
-        meses = meses % 12
-    partes = []
-    if años > 0:
-        partes.append(f"{años} año{'s' if años != 1 else ''}")
-    if meses > 0:
-        partes.append(f"{meses} mes{'es' if meses != 1 else ''}")
-    if dias_resto > 0:
-        partes.append(f"{dias_resto} día{'s' if dias_resto != 1 else ''}")
-    resultado = ', '.join(partes) if partes else "0 días"
-    return signo + resultado
+# Carpeta de la app: la plantilla y el escudo se buscan aquí aunque se abra
+# el programa desde otra carpeta (antes se perdía la plantilla en ese caso).
+if getattr(sys, "frozen", False):  # ejecutable creado con PyInstaller
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Marcadores que se escriben en negrita en el documento
+MARCADORES_NEGRITA = ["(nombre)", "(delito)", "(tribunal)", "(causa)", "(favorable)"]
 
 class PrisionApp:
     def __init__(self, root):
@@ -51,7 +49,7 @@ class PrisionApp:
         
         self.set_style()
         
-        self.plantilla_file = "plantilla.json"
+        self.plantilla_file = os.path.join(BASE_DIR, "plantilla.json")
         
         # Variables de datos del recluso
         self.nombre = tk.StringVar()
@@ -105,7 +103,7 @@ class PrisionApp:
         self.rebaja_valor = 0
         self.prev_dias_valor = 0
         
-        self.ruta_escudo = tk.StringVar(value="escudo.png")
+        self.ruta_escudo = tk.StringVar(value=os.path.join(BASE_DIR, "escudo.png"))
         
         self.crear_widgets()
         self.cargar_plantilla()
@@ -261,8 +259,8 @@ class PrisionApp:
             ("Indisciplinas:", self.indisciplinas)
         ]
         
-        self.carnet.trace("w", self.calcular_edades)
-        self.entrada.trace("w", self.calcular_edades)
+        self.carnet.trace_add("write", self.calcular_edades)
+        self.entrada.trace_add("write", self.calcular_edades)
         
         for i, (label, var) in enumerate(campos):
             ttk.Label(frame, text=label, font=('Segoe UI', 10)).grid(row=row, column=0, sticky=tk.W, pady=4)
@@ -278,27 +276,17 @@ class PrisionApp:
             self.ruta_escudo.set(filename)
     
     def calcular_edades(self, *args):
-        carnet = self.carnet.get().strip()
-        if not (carnet and len(carnet) >= 2 and carnet[:2].isdigit()):
+        """Rellena la edad actual y la edad al entrar a partir del carnet."""
+        nacimiento = nacimiento_desde_ci(self.carnet.get(), self.hoy)
+        if nacimiento is None:
             return
+        self.edad_actual.set(str(edad_en(nacimiento, self.hoy)))
         try:
-            dos_digitos = int(carnet[:2])
-            año_nacimiento = 2000 + dos_digitos if dos_digitos <= datetime.now().year % 100 else 1900 + dos_digitos
-            edad_actual = self.hoy.year - año_nacimiento
-            if (self.hoy.month, self.hoy.day) < (1, 1):
-                edad_actual -= 1
-            self.edad_actual.set(str(edad_actual))
-            try:
-                fecha_entrada_dt = datetime.strptime(self.entrada.get().strip(), "%d/%m/%Y")
-                edad_entrada = fecha_entrada_dt.year - año_nacimiento
-                if (fecha_entrada_dt.month, fecha_entrada_dt.day) < (1, 1):
-                    edad_entrada -= 1
-                self.edad_entrada.set(str(edad_entrada))
-            except:
-                self.edad_entrada.set("")
-        except:
-            pass
-    
+            entrada = parsear_fecha(self.entrada.get())
+            self.edad_entrada.set(str(edad_en(nacimiento, entrada)))
+        except ValueError:
+            self.edad_entrada.set("")
+
     def crear_pestana_plantilla_mejorada(self, parent):
         """Versión con botones para insertar marcadores"""
         # Panel principal con dos columnas
@@ -369,8 +357,8 @@ class PrisionApp:
                     data = json.load(f)
                     plantilla = data.get("plantilla", "")
                     self.plantilla_text.insert("1.0", plantilla)
-            except:
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                messagebox.showwarning("Plantilla", f"No se pudo cargar la plantilla guardada:\n{e}")
     
     def guardar_plantilla(self):
         plantilla = self.plantilla_text.get("1.0", tk.END).strip()
@@ -384,116 +372,105 @@ class PrisionApp:
     def limpiar_plantilla(self):
         self.plantilla_text.delete("1.0", tk.END)
     
+    def leer_entero(self, texto, nombre_campo):
+        """Convierte un campo numérico opcional en entero (vacío = 0)."""
+        texto = texto.strip()
+        if not texto:
+            return 0
+        try:
+            valor = int(texto)
+        except ValueError:
+            raise ValueError(f"{nombre_campo} debe ser un número entero")
+        if valor < 0:
+            raise ValueError(f"{nombre_campo} no puede ser negativo")
+        return valor
+
     def calcular(self):
         try:
-            fecha_entrada = datetime.strptime(self.entrada.get().strip(), "%d/%m/%Y")
+            fecha_entrada = parsear_fecha(self.entrada.get())
         except ValueError:
             messagebox.showerror("Error", "Fecha de entrada inválida (use DD/MM/YYYY)")
             return
         try:
-            fecha_salida = datetime.strptime(self.salida.get().strip(), "%d/%m/%Y")
+            fecha_salida = parsear_fecha(self.salida.get())
         except ValueError:
             messagebox.showerror("Error", "Fecha de salida inválida (use DD/MM/YYYY)")
             return
-        if fecha_salida <= fecha_entrada:
-            messagebox.showerror("Error", "La fecha de salida debe ser posterior a la de entrada")
-            return
-        
+
         try:
-            rebaja = int(self.rebaja.get().strip()) if self.rebaja.get().strip() else 0
-        except ValueError:
-            messagebox.showerror("Error", "Rebaja debe ser número entero")
+            rebaja = self.leer_entero(self.rebaja.get(), "La rebaja")
+            if self.prev_inicio.get().strip() and self.prev_fin.get().strip():
+                try:
+                    p_ini = parsear_fecha(self.prev_inicio.get())
+                    p_fin = parsear_fecha(self.prev_fin.get())
+                except ValueError:
+                    raise ValueError("Fechas de preventiva inválidas (use DD/MM/YYYY)")
+                if p_fin < p_ini:
+                    raise ValueError("El fin de la preventiva debe ser posterior al inicio")
+                prev_dias = (p_fin - p_ini).days
+            else:
+                prev_dias = self.leer_entero(self.prev_dias.get(), "Los días de preventiva")
+
+            r = calcular_condena(fecha_entrada, fecha_salida, rebaja, prev_dias, self.hoy)
+        except ValueError as e:
+            messagebox.showerror("Error", str(e))
             return
-        self.rebaja_valor = rebaja
-        
-        prev_dias = 0
-        if self.prev_inicio.get().strip() and self.prev_fin.get().strip():
-            try:
-                p_ini = datetime.strptime(self.prev_inicio.get().strip(), "%d/%m/%Y")
-                p_fin = datetime.strptime(self.prev_fin.get().strip(), "%d/%m/%Y")
-                if p_fin >= p_ini:
-                    prev_dias = (p_fin - p_ini).days
-                else:
-                    messagebox.showerror("Error", "Fin de preventiva debe ser posterior a inicio")
-                    return
-            except ValueError:
-                messagebox.showerror("Error", "Fechas de preventiva inválidas")
-                return
-        elif self.prev_dias.get().strip():
-            try:
-                prev_dias = int(self.prev_dias.get().strip())
-            except ValueError:
-                messagebox.showerror("Error", "Días de preventiva deben ser número entero")
-                return
-        self.prev_dias_valor = prev_dias
-        
-        condena_efectiva_dias = (fecha_salida - fecha_entrada).days
-        mitad_orig = condena_efectiva_dias // 2
-        tercio_orig = condena_efectiva_dias // 3
-        dos_tercios_orig = condena_efectiva_dias * 2 // 3
-        
-        self.fecha_mitad_original = fecha_entrada + timedelta(days=mitad_orig)
-        self.fecha_tercio_original = fecha_entrada + timedelta(days=tercio_orig)
-        self.fecha_dos_tercios_original = fecha_entrada + timedelta(days=dos_tercios_orig)
-        
-        self.fecha_salida_con_rebaja = fecha_salida - timedelta(days=rebaja) if rebaja > 0 else fecha_salida
-        self.fecha_mitad_con_rebaja = self.fecha_mitad_original - timedelta(days=rebaja) if rebaja > 0 else self.fecha_mitad_original
-        self.fecha_tercio_con_rebaja = self.fecha_tercio_original - timedelta(days=rebaja) if rebaja > 0 else self.fecha_tercio_original
-        self.fecha_dos_tercios_con_rebaja = self.fecha_dos_tercios_original - timedelta(days=rebaja) if rebaja > 0 else self.fecha_dos_tercios_original
-        
-        self.condena_original_dias = condena_efectiva_dias + prev_dias
-        self.condena_original_str = convertir_dias_mejorado(self.condena_original_dias)
-        self.fecha_salida_original_con_preventiva = fecha_salida + timedelta(days=prev_dias)
-        
-        dias_transcurridos = (self.hoy - fecha_entrada).days
-        if dias_transcurridos < 0:
-            dias_transcurridos = 0
-        self.dias_cumplidos = dias_transcurridos + rebaja
-        self.cumplido_str = convertir_dias_mejorado(self.dias_cumplidos)
-        
-        dias_hasta_salida_con_rebaja = (self.fecha_salida_con_rebaja - self.hoy).days
-        if dias_hasta_salida_con_rebaja < 0:
-            dias_hasta_salida_con_rebaja = 0
-        self.dias_restantes = dias_hasta_salida_con_rebaja
-        self.restante_str = convertir_dias_mejorado(self.dias_restantes)
-        
-        self.fecha_entrada_dt = fecha_entrada
-        self.fecha_salida_dt = fecha_salida
-        
+
+        # Guardamos los resultados para la plantilla
+        self.rebaja_valor = r.rebaja
+        self.prev_dias_valor = r.prev_dias
+        self.fecha_entrada_dt = r.fecha_entrada
+        self.fecha_salida_dt = r.fecha_salida
+        self.condena_original_dias = r.condena_original_dias
+        self.condena_original_str = convertir_dias(r.condena_original_dias)
+        self.fecha_salida_original_con_preventiva = r.salida_original_con_preventiva
+        self.fecha_mitad_original = r.mitad
+        self.fecha_tercio_original = r.tercio
+        self.fecha_dos_tercios_original = r.dos_tercios
+        self.fecha_salida_con_rebaja = r.salida_con_rebaja
+        self.fecha_mitad_con_rebaja = r.mitad_con_rebaja
+        self.fecha_tercio_con_rebaja = r.tercio_con_rebaja
+        self.fecha_dos_tercios_con_rebaja = r.dos_tercios_con_rebaja
+        self.dias_cumplidos = r.dias_cumplidos
+        self.dias_restantes = r.dias_restantes
+        self.cumplido_str = convertir_dias(r.dias_cumplidos)
+        self.restante_str = convertir_dias(r.dias_restantes)
+
+        d = lambda f: f.strftime('%d/%m/%Y')
         resultado = f"""
 === DATOS DE LA CONDENA ===
-Fecha de entrada: {fecha_entrada.strftime('%d/%m/%Y')}
-Fecha de salida (con preventiva ya descontada): {fecha_salida.strftime('%d/%m/%Y')}
-Condena efectiva (entrada a salida): {condena_efectiva_dias} días -> {convertir_dias_mejorado(condena_efectiva_dias)}
+Fecha de entrada: {d(r.fecha_entrada)}
+Fecha de salida (con preventiva ya descontada): {d(r.fecha_salida)}
+Condena efectiva (entrada a salida): {r.condena_efectiva_dias} días -> {convertir_dias(r.condena_efectiva_dias)}
 
 === PREVENTIVA ===
-Días de preventiva: {prev_dias}
-Condena original (con preventiva): {self.condena_original_dias} días -> {self.condena_original_str}
-Fecha de salida si no se descontara preventiva: {self.fecha_salida_original_con_preventiva.strftime('%d/%m/%Y')}
+Días de preventiva: {r.prev_dias}
+Condena original (con preventiva): {r.condena_original_dias} días -> {self.condena_original_str}
+Fecha de salida si no se descontara preventiva: {d(r.salida_original_con_preventiva)}
 
 === FECHAS ORIGINALES (sin rebaja) ===
-Mitad: {self.fecha_mitad_original.strftime('%d/%m/%Y')}
-Tercio: {self.fecha_tercio_original.strftime('%d/%m/%Y')}
-Dos tercios: {self.fecha_dos_tercios_original.strftime('%d/%m/%Y')}
+Mitad: {d(r.mitad)}
+Tercio: {d(r.tercio)}
+Dos tercios: {d(r.dos_tercios)}
 
-=== FECHAS CON REBAJA (restamos {rebaja} días) ===
-Fecha de salida con rebaja: {self.fecha_salida_con_rebaja.strftime('%d/%m/%Y')}
-Mitad con rebaja: {self.fecha_mitad_con_rebaja.strftime('%d/%m/%Y')}
-Tercio con rebaja: {self.fecha_tercio_con_rebaja.strftime('%d/%m/%Y')}
-Dos tercios con rebaja: {self.fecha_dos_tercios_con_rebaja.strftime('%d/%m/%Y')}
+=== FECHAS CON REBAJA (restamos {r.rebaja} días) ===
+Fecha de salida con rebaja: {d(r.salida_con_rebaja)}
+Mitad con rebaja: {d(r.mitad_con_rebaja)}
+Tercio con rebaja: {d(r.tercio_con_rebaja)}
+Dos tercios con rebaja: {d(r.dos_tercios_con_rebaja)}
 
-=== TIEMPO CUMPLIDO HASTA HOY ({self.hoy.strftime('%d/%m/%Y')}) ===
-Días desde entrada hasta hoy: {dias_transcurridos}
-+ días de rebaja: {rebaja} = {self.dias_cumplidos} días cumplidos -> {self.cumplido_str}
-Días restantes hasta nueva salida: {self.dias_restantes} -> {self.restante_str}
+=== TIEMPO CUMPLIDO HASTA HOY ({d(self.hoy)}) ===
+Días desde entrada hasta hoy: {r.dias_transcurridos}
++ días de rebaja: {r.rebaja} = {r.dias_cumplidos} días cumplidos -> {self.cumplido_str}
+Días restantes hasta nueva salida: {r.dias_restantes} -> {self.restante_str}
 """
         self.resultado_calculos.config(state=tk.NORMAL)
         self.resultado_calculos.delete(1.0, tk.END)
         self.resultado_calculos.insert(tk.END, resultado)
         self.resultado_calculos.config(state=tk.DISABLED)
-        
+
         messagebox.showinfo("Cálculo completado", "Datos actualizados. Puede generar el documento.")
-    
+
     def generar_documento(self):
         if self.fecha_entrada_dt is None:
             messagebox.showerror("Error", "Primero debe realizar el cálculo.")
@@ -514,8 +491,8 @@ Días restantes hasta nueva salida: {self.dias_restantes} -> {self.restante_str}
             try:
                 doc.add_picture(self.ruta_escudo.get(), width=Inches(2.0))
                 doc.add_paragraph()
-            except:
-                pass
+            except Exception as e:  # imagen dañada o formato no soportado
+                messagebox.showwarning("Escudo", f"No se pudo añadir el escudo:\n{e}")
         
         def f(fecha):
             return fecha_larga(fecha) if fecha else ""
@@ -560,41 +537,13 @@ Días restantes hasta nueva salida: {self.dias_restantes} -> {self.restante_str}
             "(FechaActual)": f(self.hoy),
         }
         
-        negrita = ["(nombre)", "(delito)", "(tribunal)", "(causa)", "(favorable)"]
-        
-        lineas = plantilla.split('\n')
-        for i, linea in enumerate(lineas):
-            if not linea.strip():
-                if i < len(lineas)-1 and lineas[i+1].strip() == "":
-                    continue
-                doc.add_paragraph()
-                continue
-            p = doc.add_paragraph()
-            resto = linea
-            while resto:
-                inicio = resto.find('(')
-                if inicio == -1:
-                    if resto:
-                        p.add_run(resto)
-                    break
-                if inicio > 0:
-                    p.add_run(resto[:inicio])
-                fin = resto.find(')', inicio)
-                if fin == -1:
-                    p.add_run(resto[inicio:])
-                    break
-                marcador = resto[inicio:fin+1]
-                valor = valores.get(marcador, marcador)
-                run = p.add_run(valor)
-                if marcador in negrita:
-                    run.bold = True
-                resto = resto[fin+1:]
-        
+        rellenar_plantilla(doc, plantilla, valores, MARCADORES_NEGRITA)
+
         nombre_limpio = self.nombre.get().strip().replace(" ", "_") if self.nombre.get().strip() else "documento"
-        sugerencia = f"{nombre_limpio}.doc"
+        sugerencia = f"{nombre_limpio}.docx"
         file_path = filedialog.asksaveasfilename(
-            defaultextension=".doc",
-            filetypes=[("Documento Word 97-2003", "*.doc"), ("Todos los archivos", "*.*")],
+            defaultextension=".docx",
+            filetypes=[("Documento Word", "*.docx"), ("Todos los archivos", "*.*")],
             title="Guardar documento como",
             initialfile=sugerencia
         )
